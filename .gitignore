@@ -1,0 +1,49 @@
+# Node.js dependencies
+/node_modules
+
+# Build output
+/dist
+/build
+/out
+
+# Environment variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.swp
+
+# Coverage reports
+/coverage
+
+# Temporary files
+*.tmp
+*.temp
+
+# Cache
+/.cache
+/.parcel-cache
+.next/
+.nuxt/
+.svelte-kit/
+
+# Misc
+*.pid
+*.seed
+*.tgz
