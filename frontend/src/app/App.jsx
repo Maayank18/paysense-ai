@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
-import { useUserStore }   from '@/features/user/userStore';
-import { useSocket }      from '@/hooks/useSocket';
-import ToastContainer     from '@/components/ui/Toast';
+import { useUserStore }   from '../features/user/store/userStore';
+import { useSocket }      from '../hooks/useSocket';
+import ToastContainer     from '../components/ui/Toast';
 import AppRoutes          from './routes';
 
 export default function App() {

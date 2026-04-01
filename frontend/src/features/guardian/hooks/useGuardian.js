@@ -1,6 +1,6 @@
 import { useCallback } from 'react';
-import { guardianApi } from '../guardianApi';
-import { useGuardianStore } from '../guardianStore';
+import { guardianApi } from '../guardian.api';
+import { useGuardianStore } from '../store/guardianStore';
 import { guardianSocket } from '@/services/socket';
 import { haptic } from '@/utils/helpers';
 import { toast } from '@/components/ui/Toast';

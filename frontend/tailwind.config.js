@@ -14,7 +14,7 @@ export default {
         },
         // ── Semantic ──────────────────────────────────────────────────
         surface: '#F4F6F9',      // App background
-        card: '#FFFFFF',
+        'surface-card': '#FFFFFF',
         // ── Status ────────────────────────────────────────────────────
         success: '#00C853',
         'success-light': '#E8F9EE',

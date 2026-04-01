@@ -43,7 +43,7 @@ export default function ToastContainer() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -8, scale: 0.95 }}
               transition={{ duration: 0.22, type: 'spring', damping: 25 }}
-              className="pointer-events-auto w-full rounded-2xl px-4 py-3 flex items-center gap-3 text-sm font-500"
+              className="pointer-events-auto w-full rounded-2xl px-4 py-3 flex items-center gap-3 text-sm font-[500]"
               style={{ background: style.bg, border: `1px solid ${style.border}`, color: style.text,
                        boxShadow: '0 4px 16px rgba(0,0,0,0.10)' }}
             >

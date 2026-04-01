@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { Bell, Search, ArrowLeft, MoreVertical } from 'lucide-react';
-import { useUserStore } from '@/features/user/userStore';
+import { useUserStore } from '@/features/user/store/userStore';
 import { getInitials, getAvatarColor } from '@/utils/helpers';
 
 export default function TopBar({ title, showBack, showSearch = true, showBell = true, rightAction }) {
@@ -21,7 +21,7 @@ export default function TopBar({ title, showBack, showSearch = true, showBell = 
           {/* Avatar */}
           <button
             onClick={() => navigate('/profile')}
-            className="avatar w-9 h-9 text-sm font-700 flex-shrink-0 ripple"
+            className="avatar w-9 h-9 text-sm font-[700] flex-shrink-0 ripple"
             style={{ background: bg, color: text }}
           >
             {initials}

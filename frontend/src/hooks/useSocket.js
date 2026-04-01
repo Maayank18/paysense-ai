@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { guardianSocket, vaniSocket, connectSockets, disconnectSockets } from '@/services/socket';
-import { useGuardianStore } from '@/features/guardian/guardianStore';
-import { useVaniStore } from '@/features/vani/vaniStore';
+import { useGuardianStore } from '@/features/guardian/store/guardianStore';
+import { useVaniStore } from '@/features/vani/store/vaniStore';
 
 export const useSocket = (userId) => {
   const initialized = useRef(false);

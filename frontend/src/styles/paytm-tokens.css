@@ -1,3 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 /* ─────────────────────────────────────────────────────────────────────────────
    Paytm Design Tokens + Global Base Styles
    Mirrors Paytm's visual language for maximum judge fidelity

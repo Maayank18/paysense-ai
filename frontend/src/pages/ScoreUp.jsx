@@ -7,14 +7,12 @@ import {
 } from 'lucide-react';
 import PaytmShell from '@/components/layout/PaytmShell';
 import CreditRing from '@/features/scoreup/components/CreditRing';
-import {
-  CoachingCard,
-  StreakBadge,
-  ScoreFactor,
-  EMIAlert,
-} from '@/features/scoreup/components/ScoreComponents';
-import { useScoreUpStore } from '@/features/scoreup/scoreupStore';
-import { scoreupApi } from '@/features/scoreup/scoreupApi';
+import CoachingCard from '@/features/scoreup/components/CoachingCard';
+import StreakBadge from '@/features/scoreup/components/StreakBadge';
+import ScoreFactor from '@/features/scoreup/components/ScoreFactor';
+import EMIAlert from '@/features/scoreup/components/EMIAlert';
+import { useScoreUpStore } from '@/features/scoreup/store/useScoreUpStore';
+import { scoreupApi } from '@/features/scoreup/scoreup.api';
 import { CardSkeleton } from '@/components/ui/Skeleton';
 import { toast } from '@/components/ui/Toast';
 import { formatINR, getScoreLevel, cx } from '@/utils/helpers';
