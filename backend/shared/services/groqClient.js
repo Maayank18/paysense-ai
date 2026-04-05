@@ -1,36 +1,29 @@
 'use strict';
 
 const Groq = require('groq-sdk');
-const env = require('../../config/env');
+const env  = require('../../config/env');
 const { redis, safeRedis, TTL } = require('../../config/redis');
 const { startTimer, safeJsonParse } = require('../utils/helpers');
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Groq SDK singleton — re-used across all modules
-// ─────────────────────────────────────────────────────────────────────────────
 const groq = new Groq({ apiKey: env.GROQ_API_KEY });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal call wrapper — handles retries, timing, and error normalization
+// callGroq — shared wrapper: retry × 2, caching, timing
 // ─────────────────────────────────────────────────────────────────────────────
 const callGroq = async ({ systemPrompt, userContent, maxTokens = 150, jsonMode = false, cacheKey = null }) => {
-  // 1. Cache check (only for deterministic prompts like ScoreUp)
   if (cacheKey) {
     const cached = await safeRedis(() => redis.get(`groq:${cacheKey}`));
-    if (cached) {
-      return { text: cached, fromCache: true, latencyMs: 0 };
-    }
+    if (cached) return { text: cached, fromCache: true, latencyMs: 0 };
   }
 
   const endTimer = startTimer();
-
-  const requestPayload = {
-    model: env.GROQ_MODEL,
-    max_tokens: maxTokens,
-    temperature: 0.4,  // lower = more consistent, less creative → good for fintech
+  const payload  = {
+    model:       env.GROQ_MODEL,
+    max_tokens:  maxTokens,
+    temperature: 0.4,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: userContent },
+      { role: 'user',   content: userContent  },
     ],
     ...(jsonMode && { response_format: { type: 'json_object' } }),
   };
@@ -38,19 +31,11 @@ const callGroq = async ({ systemPrompt, userContent, maxTokens = 150, jsonMode =
   let lastError;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const completion = await groq.chat.completions.create(requestPayload);
-      const text = completion.choices[0]?.message?.content?.trim() ?? '';
-      const latencyMs = endTimer();
-
-      console.log(
-        `⚡ [Groq] ${cacheKey || 'uncached'} | ${Math.round(latencyMs)}ms | tokens: ${completion.usage?.total_tokens ?? '?'}`
-      );
-
-      // Cache result if key provided
-      if (cacheKey && text) {
-        await safeRedis(() => redis.setex(`groq:${cacheKey}`, TTL.GROQ_RESPONSE, text));
-      }
-
+      const completion = await groq.chat.completions.create(payload);
+      const text       = completion.choices[0]?.message?.content?.trim() ?? '';
+      const latencyMs  = endTimer();
+      console.log(`⚡ [Groq] ${cacheKey || 'uncached'} | ${Math.round(latencyMs)}ms | ${completion.usage?.total_tokens ?? '?'} tokens`);
+      if (cacheKey && text) await safeRedis(() => redis.setex(`groq:${cacheKey}`, TTL.GROQ_RESPONSE, text));
       return { text, fromCache: false, latencyMs };
     } catch (err) {
       lastError = err;
@@ -58,65 +43,71 @@ const callGroq = async ({ systemPrompt, userContent, maxTokens = 150, jsonMode =
       if (attempt < 2) await new Promise((r) => setTimeout(r, 300));
     }
   }
-
-  throw new Error(`Groq inference failed after 2 attempts: ${lastError?.message}`);
+  throw new Error(`Groq inference failed: ${lastError?.message}`);
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MODULE 1: GUARDIAN — Hinglish fraud explanation
-// Input: transaction + risk result → Output: 1-sentence Hinglish warning
+// generateGuardianMessage
+// FIX 5: Uses fraudType.groqContext so each fraud type gets a specific
+//         Hinglish explanation, not a generic "suspicious transaction" message.
 // ─────────────────────────────────────────────────────────────────────────────
 const generateGuardianMessage = async (tx, riskResult) => {
-  const systemPrompt = `You are PaySense Guardian, a financial security AI for Indian Paytm users.
-A real-time risk engine flagged a transaction. Write exactly ONE Hinglish warning sentence (max 20 words).
+  const fraudType    = riskResult.fraudType;
+  const fraudContext = fraudType?.groqContext
+    || 'This transaction has multiple suspicious signals that match fraud patterns.';
+
+  const systemPrompt =
+    `You are PaySense Guardian, a financial security AI for Indian Paytm users.
+A real-time fraud engine flagged a transaction. Write ONE Hinglish warning (max 20 words).
 Rules:
-- Start with "Rukiye —" (means "Stop —")
-- Mention the SPECIFIC reason from the flags (not generic)
-- Mention the amount
-- End with a clear action: "Pehle verify karein" or "Ruk jaiye"
-- NO greetings. NO markdown. NO extra sentences.
-Example: "Rukiye — ₹25,000 ek naye UPI ID ko ja raha hai jisko aapne kabhi pay nahi kiya — pehle verify karein."`;
+- Start with "Rukiye —"
+- Reference THIS specific fraud context: ${fraudContext}
+- Mention the exact amount
+- End with "Pehle verify karein" OR "Ruk jaiye"
+- NO greetings. NO markdown. ONE sentence only.`;
 
-  const userContent = `Amount: ₹${(tx.amountPaise / 100).toFixed(0)}
+  const userContent =
+    `Amount: ₹${(tx.amountPaise / 100).toFixed(0)}
 Payee UPI: ${tx.payeeUpi}
+Fraud Type: ${fraudType?.label || 'Suspicious'}
 Risk Score: ${riskResult.score}/100
-Decision: ${riskResult.decision}
-Risk Flags: ${riskResult.flags.join(' | ')}`;
+Top Flags: ${riskResult.flags.slice(0, 3).join(' | ')}`;
 
-  // Use fallback if Groq is slow — better UX than waiting 2s
-  const fallbacks = {
-    BLOCK: `Rukiye — yeh transaction suspicious lag raha hai, ₹${(tx.amountPaise / 100).toFixed(0)} bhejne se pehle verify karein.`,
-    WARN: `Savdhan — ₹${(tx.amountPaise / 100).toFixed(0)} ki payment ke liye yeh UPI ID naya hai, ek baar confirm karein.`,
+  // Type-specific fallbacks — fire even when Groq is unavailable
+  const typeFallbacks = {
+    PHISHING_ATTEMPT:   `Rukiye — ₹${(tx.amountPaise/100).toFixed(0)} ek phishing UPI ID ko ja raha hai, yeh KYC scam ho sakta hai — ruk jaiye.`,
+    SOCIAL_ENGINEERING: `Rukiye — ₹${(tx.amountPaise/100).toFixed(0)} ki payment ek anjaan ID ko ja rahi hai, social engineering scam ho sakta hai — pehle verify karein.`,
+    ACCOUNT_TAKEOVER:   `Rukiye — naye device se ₹${(tx.amountPaise/100).toFixed(0)} ki payment suspicious hai, apna UPI PIN abhi badlein.`,
+    VELOCITY_FRAUD:     `Rukiye — bahut zyada transactions ek sath ho rahi hain, ₹${(tx.amountPaise/100).toFixed(0)} ki payment rok lein — pehle verify karein.`,
+    AMOUNT_ANOMALY:     `Rukiye — ₹${(tx.amountPaise/100).toFixed(0)} aapke normal kharche se bahut zyada hai — pehle verify karein.`,
+    TEMPORAL_ANOMALY:   `Savdhan — raat ko anjaan UPI ID ko ₹${(tx.amountPaise/100).toFixed(0)} bhejne se pehle ek baar sochein.`,
+    BLOCK:              `Rukiye — yeh transaction suspicious lag raha hai — ₹${(tx.amountPaise/100).toFixed(0)} bhejne se pehle verify karein.`,
+    WARN:               `Savdhan — ₹${(tx.amountPaise/100).toFixed(0)} ki payment ke liye yeh UPI ID naya hai — ek baar confirm karein.`,
   };
+
+  const fallback = typeFallbacks[fraudType?.id] ?? typeFallbacks[riskResult.decision] ?? typeFallbacks.BLOCK;
 
   try {
     const result = await callGroq({ systemPrompt, userContent, maxTokens: 80 });
-    return result.text || fallbacks[riskResult.decision] || fallbacks.WARN;
+    return result.text || fallback;
   } catch {
-    return fallbacks[riskResult.decision] || fallbacks.WARN;
+    return fallback;
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MODULE 1: GUARDIAN — Weekly spend insight nudge
-// Input: spend summary → Output: personalized insight message
+// generateSpendInsight — weekly spend nudge for Guardian Insights
 // ─────────────────────────────────────────────────────────────────────────────
 const generateSpendInsight = async (spendSummary, userId) => {
-  const systemPrompt = `You are PaySense, a friendly AI financial advisor for Indian users.
-Write ONE actionable spend insight in Hinglish (max 25 words).
-Rules:
-- Be specific about category and percentage change
-- Use "aap" (you, formal)
-- One clear suggestion
-- NO greetings. NO markdown.`;
+  const systemPrompt =
+    `You are PaySense, a friendly Indian financial advisor.
+Write ONE Hinglish spend insight (max 25 words). Be specific about category + change %.
+Use "aap". One clear suggestion. NO greetings, NO markdown.`;
 
-  const userContent = `Top category: ${spendSummary.topCategory}
-This week spend: ₹${spendSummary.thisWeekTotal}
-Last week spend: ₹${spendSummary.lastWeekTotal}
-Change: ${spendSummary.changePercent > 0 ? '+' : ''}${spendSummary.changePercent}%
-Biggest anomaly: ${spendSummary.anomaly || 'none'}`;
+  const userContent =
+    `Top: ${spendSummary.topCategory} | This week: ₹${spendSummary.thisWeekTotal} | Last week: ₹${spendSummary.lastWeekTotal} | Change: ${spendSummary.changePercent > 0 ? '+' : ''}${spendSummary.changePercent}% | Anomaly: ${spendSummary.anomaly || 'none'}`;
 
-  const cacheKey = `spend_insight_${userId}_${new Date().toISOString().slice(0, 10)}`;
+  const cacheKey = `spend_${userId}_${new Date().toISOString().slice(0, 10)}`;
 
   try {
     const result = await callGroq({ systemPrompt, userContent, maxTokens: 80, cacheKey });
@@ -127,77 +118,48 @@ Biggest anomaly: ${spendSummary.anomaly || 'none'}`;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MODULE 2: VANI — NLU intent extraction (JSON mode — structured output)
-// Input: Hinglish transcript → Output: { intent, entities, confidence }
+// extractIntent — Vani NLU (JSON mode structured output)
 // ─────────────────────────────────────────────────────────────────────────────
 const extractIntent = async (transcript) => {
-  const systemPrompt = `You are an NLU engine for an Indian UPI payments app.
-Analyze the Hinglish/Hindi user utterance and extract the intent and entities.
-Respond ONLY with valid JSON matching this EXACT schema — no extra text:
-{
-  "intent": "PAY_PERSON" | "CHECK_BALANCE" | "GET_SUMMARY" | "PAY_BILL" | "CHECK_SCOREUP" | "CANCEL" | "CONFIRM" | "UNKNOWN",
-  "entities": {
-    "payeeName": "string or null",
-    "amountText": "the exact amount words spoken or null",
-    "amountNumber": "number or null (extract if clearly numeric)",
-    "timeframe": "today | this_week | this_month | last_week | null",
-    "billType": "electricity | gas | water | broadband | mobile | null"
-  },
-  "confidence": 0.0
-}
-Examples:
-- "Ramesh ko paanch sau bhejo" → PAY_PERSON, payeeName=Ramesh, amountText=paanch sau
-- "Mera balance kya hai" → CHECK_BALANCE
-- "Is hafte kitna kharch kiya" → GET_SUMMARY, timeframe=this_week
-- "Haan" or "confirm" → CONFIRM
-- "Nahi" or "cancel" → CANCEL`;
+  const systemPrompt =
+    `You are an NLU engine for an Indian UPI payments app.
+Extract intent and entities from Hinglish/Hindi. Respond ONLY with valid JSON:
+{"intent":"PAY_PERSON"|"CHECK_BALANCE"|"GET_SUMMARY"|"PAY_BILL"|"CHECK_SCOREUP"|"CANCEL"|"CONFIRM"|"UNKNOWN","entities":{"payeeName":null,"amountText":null,"amountNumber":null,"timeframe":null,"billType":null},"confidence":0.0}`;
 
   try {
-    const result = await callGroq({
-      systemPrompt,
-      userContent: transcript,
-      maxTokens: 200,
-      jsonMode: true,
-    });
-
+    const result = await callGroq({ systemPrompt, userContent: transcript, maxTokens: 200, jsonMode: true });
     const parsed = safeJsonParse(result.text);
-    if (!parsed || !parsed.intent) throw new Error('Invalid JSON from Groq NLU');
+    if (!parsed?.intent) throw new Error('Invalid NLU JSON');
     return parsed;
-  } catch (err) {
-    console.warn('[Groq NLU] Extraction failed, returning UNKNOWN:', err.message);
-    return {
-      intent: 'UNKNOWN',
-      entities: { payeeName: null, amountText: null, amountNumber: null, timeframe: null, billType: null },
-      confidence: 0.0,
-    };
+  } catch {
+    return { intent:'UNKNOWN', entities:{ payeeName:null, amountText:null, amountNumber:null, timeframe:null, billType:null }, confidence:0.0 };
   }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MODULE 2: VANI — Conversational response generation (Hindi TTS text)
-// Input: action result → Output: natural Hindi response string
+// generateVaniResponse — TTS text for Vani voice responses
 // ─────────────────────────────────────────────────────────────────────────────
 const generateVaniResponse = async (action, context) => {
-  const systemPrompt = `You are Vani, a friendly Hindi voice assistant for Paytm.
-Speak in natural Hinglish (mix of Hindi + English numbers/names).
-Be brief — max 15 words. Be warm and conversational.
-NO markdown. NO asterisks. Just the spoken text.`;
-
-  const userContent = `Action: ${action}
-Context: ${JSON.stringify(context)}`;
+  const systemPrompt =
+    `You are Vani, Paytm's Hindi voice assistant. Speak natural Hinglish. Max 15 words. Warm, conversational. NO markdown.`;
 
   const fallbacks = {
     PAYMENT_SUCCESS: `${context.payee} ko ₹${context.amount} bhej diye. Done!`,
-    PAYMENT_CONFIRM: `${context.payee} ko ₹${context.amount} bhejein? Confirm karne ke liye "haan" bolein.`,
-    BALANCE_RESULT: `Aapka available balance ₹${context.balance} hai.`,
-    SUMMARY_RESULT: `Is hafte aapne ₹${context.total} kharch kiye.`,
-    CLARIFY_PAYEE: `Kisko bhejna hai? Contact ka naam batao.`,
-    CLARIFY_AMOUNT: `Kitna bhejna hai?`,
-    UNKNOWN_INTENT: `Samajh nahi aaya. Dobara try karein ya tap karke pay karein.`,
+    PAYMENT_CONFIRM: `${context.payee} ko ₹${context.amount} bhejein? "Haan" bolein.`,
+    BALANCE_RESULT:  `Aapka available balance ₹${context.balance} hai.`,
+    SUMMARY_RESULT:  `Is hafte aapne ₹${context.total} kharch kiye.`,
+    CLARIFY_PAYEE:   `Kisko bhejna hai? Contact ka naam batao.`,
+    CLARIFY_AMOUNT:  `Kitna bhejna hai?`,
+    SCORE_RESULT:    `Aapka credit score ${context.score} hai — ${context.level} level.`,
+    UNKNOWN_INTENT:  `Samajh nahi aaya. Dobara try karein.`,
   };
 
   try {
-    const result = await callGroq({ systemPrompt, userContent, maxTokens: 60 });
+    const result = await callGroq({
+      systemPrompt,
+      userContent: `Action: ${action}\nContext: ${JSON.stringify(context)}`,
+      maxTokens:   60,
+    });
     return result.text || fallbacks[action] || fallbacks.UNKNOWN_INTENT;
   } catch {
     return fallbacks[action] || fallbacks.UNKNOWN_INTENT;
@@ -205,43 +167,35 @@ Context: ${JSON.stringify(context)}`;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MODULE 3: SCOREUP — Personalized credit coaching message
-// Input: credit signals + event type → Output: punchy Hindi nudge (≤140 chars)
+// generateCoachingMessage — ScoreUp credit nudge
 // ─────────────────────────────────────────────────────────────────────────────
 const generateCoachingMessage = async (creditSignals, event, userId) => {
-  const systemPrompt = `You are ScoreUp, a gamified credit health coach inside Paytm.
-Write ONE punchy coaching message in Hinglish (max 130 characters).
-Rules:
-- Use 1-2 relevant emojis
-- Focus on either GAIN framing (what they unlock) OR LOSS framing (what they'll lose)
-- Mention Postpaid limit or credit score specifically
-- Make it feel like a CRED push notification — exciting, personal
-- NO greetings. NO markdown.
-Examples:
-- "🔥 4 din ki streak! ₹500 aur bharo Postpaid → ₹3,000 limit boost mil sakta hai!"
-- "⚠️ Utilization 82% ho gaya — ₹1,200 abhi bharo warna score gir sakta hai"`;
+  const systemPrompt =
+    `You are ScoreUp, a gamified credit coach inside Paytm. ONE punchy Hinglish message (max 130 chars).
+Use 1-2 emojis. GAIN or LOSS framing. Mention Postpaid limit or score. CRED-style urgency. NO greetings.`;
 
   const { score, streak, postpaidUtilized, postpaidLimit } = creditSignals;
   const utilPct = Math.round((postpaidUtilized / postpaidLimit) * 100);
 
-  const userContent = `Event: ${event}
-Credit Score: ${score}/100
-Streak: ${streak} consecutive on-time payments
-Postpaid Utilization: ${utilPct}% (₹${postpaidUtilized} of ₹${postpaidLimit})`;
+  const fallbacks = {
+    ON_TIME_PAYMENT:  `✅ Payment on time! Streak ${streak} din — aise hi chalta rahe!`,
+    MISSED_PAYMENT:   `⚠️ EMI miss ho gaya — jaldi bharo warna credit score gir sakta hai.`,
+    HIGH_UTILIZATION: `⚠️ ${utilPct}% utilization — ₹${Math.ceil(postpaidUtilized*0.3/100)} abhi bharo, score badhega!`,
+    STREAK_MILESTONE: `🔥 ${streak} din ki streak! Postpaid limit boost ke liye eligible!`,
+    LIMIT_INCREASE:   `🎉 Limit increase ke liye eligible hain — details check karein!`,
+    WEEKLY_SUMMARY:   `📊 Is hafte ka score: ${score}/100. Ek payment aur — score badhega!`,
+    BILL_DUE_SOON:    `⚠️ Bill due hone wala hai — abhi pay karo warna score girta hai.`,
+  };
 
   const cacheKey = `coaching_${userId}_${event}_${new Date().toISOString().slice(0, 10)}`;
 
-  const fallbacks = {
-    ON_TIME_PAYMENT: `✅ Payment on time! Streak ${streak} din ka — aise hi chalta rahe!`,
-    MISSED_PAYMENT: `⚠️ EMI miss ho gaya — jaldi bharo warna credit score gir sakta hai.`,
-    HIGH_UTILIZATION: `⚠️ ${utilPct}% utilization — ₹${Math.ceil(postpaidUtilized * 0.3)} abhi bharo, score improve hoga!`,
-    STREAK_MILESTONE: `🔥 ${streak} din ki streak! Paytm Postpaid limit boost ke liye eligible ho sakte hain!`,
-    LIMIT_INCREASE: `🎉 Aap Postpaid limit increase ke liye eligible hain! Details check karein.`,
-    WEEKLY_SUMMARY: `📊 Is hafte ka credit score: ${score}/100. Ek payment aur — score badhega!`,
-  };
-
   try {
-    const result = await callGroq({ systemPrompt, userContent, maxTokens: 80, cacheKey });
+    const result = await callGroq({
+      systemPrompt,
+      userContent: `Event:${event} Score:${score} Streak:${streak} Util:${utilPct}%`,
+      maxTokens:   80,
+      cacheKey,
+    });
     return result.text || fallbacks[event] || fallbacks.WEEKLY_SUMMARY;
   } catch {
     return fallbacks[event] || fallbacks.WEEKLY_SUMMARY;
